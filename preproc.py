@@ -26,3 +26,21 @@
 #   positional encodings?
 #   TODO: - just to try something, I will see if I can just use a vector of the same value
 #           where len matches d_model
+
+
+def preproc():
+    # NOTE: d_model stays the same. seq_len is a bit longer
+    # take input sentences, embed as normal:
+
+    # take stock datapoints, each value becomes vector of length d_model
+
+    # append stock datapoints to end of the input sentences
+    
+    # split data:
+
+
+    
+    # input matrix will then be ((seq_len_hline + # stock_labels), d_model)
+
+
+
