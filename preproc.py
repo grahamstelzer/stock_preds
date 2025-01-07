@@ -17,6 +17,10 @@
 # and now our model shape, using transformer terminology, becomes:
 # (seq_len + stock_data, seq_len + stock_data)
 
+import pandas as pd
+import torch
+import tensorflow as tf
+
 
 
 
@@ -33,6 +37,40 @@ def preproc():
     # take input sentences, embed as normal:
 
     # take stock datapoints, each value becomes vector of length d_model
+    df = pd.read_csv("output.csv") # Date,Open,High,Low,Close,Adj Close,Volume
+
+    # print(df['Date'])
+    dates = []
+    for date in df['Date']:
+        dates.insert(0, date)
+    # print(dates)
+    
+
+
+    data_points = []
+    for o, h, l, c, a_c, v in df[['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume']].values:
+        # TODO fix this, all values end up as strings instead of flaots
+        print(o.type)
+        data_point = [o, h, l, c, a_c, v]
+        dp_tensor = torch.tensor(data_point)
+        data_points.append(dp_tensor)
+
+
+    print(data_points)
+    # data_points is 1262 by 6 
+
+
+    # NOTE: should move this have within the model since we should save the resize tensor?
+    #       not actually sure though, since we just need encoding per dp
+    #       might not need to be learned
+    for item in data_points:
+        resize_tensor = torch.randn((6,512))
+        item = item * resize_tensor
+
+    print(data_points)
+
+
+
 
     # append stock datapoints to end of the input sentences
     
@@ -44,3 +82,6 @@ def preproc():
 
 
 
+
+
+p = preproc()
