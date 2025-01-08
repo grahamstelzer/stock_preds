@@ -19,9 +19,7 @@
 
 import pandas as pd
 import torch
-import tensorflow as tf
-
-
+import os
 
 
 # TODO: I think we HAVE to include the stock data in the matmults leading up to MHA but
@@ -31,54 +29,83 @@ import tensorflow as tf
 #   TODO: - just to try something, I will see if I can just use a vector of the same value
 #           where len matches d_model
 
-
 def preproc():
+
+    # directory setup:
+    # TODO: move these to config.py
+    data_dir = 'data'
+    subdirs = ['train', 'test', 'validation']
+
+    if not os.path.exists(data_dir):
+        os.makedirs(data_dir)
+
+    for subdir in subdirs:
+        subdir_path = os.path.join(data_dir, subdir)
+        if not os.path.exists(subdir_path):
+            os.makedirs(subdir_path)
+
+
+
     # NOTE: d_model stays the same. seq_len is a bit longer
     # take input sentences, embed as normal:
 
     # take stock datapoints, each value becomes vector of length d_model
+    # NOTE: output.csv is generated automatically from get_csv.js
+    #       so COULD put into config but not really necessary right now
     df = pd.read_csv("output.csv") # Date,Open,High,Low,Close,Adj Close,Volume
 
-    # print(df['Date'])
+    df = df.dropna()
+    # remove lines that do not contain relevant data
+    df = df[~df.apply(lambda row: row.astype(str).str.contains('Dividend').any(), axis=1)] 
+    df = df[~df.apply(lambda row: row.astype(str).str.contains('Splits').any(), axis=1)]
+
+
+    # save the dates to create positional encodings
     dates = []
     for date in df['Date']:
         dates.insert(0, date)
-    # print(dates)
+    print(dates[:5])
+    print(len(dates))
     
-
-
+    # build data_points tensor
+    # NOTE: there is probably a faster way to do this but for code clarity I did it this way
     data_points = []
-    for o, h, l, c, a_c, v in df[['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume']].values:
-        # TODO fix this, all values end up as strings instead of flaots
-        print(o.type)
-        data_point = [o, h, l, c, a_c, v]
-        dp_tensor = torch.tensor(data_point)
-        data_points.append(dp_tensor)
+    for index, row in df.iterrows():
+        data_point = []
+        data_point.append(float(row['Open']))
+        data_point.append(float(row['High']))
+        data_point.append(float(row['Low']))
+        data_point.append(float(row['Close']))
+        data_point.append(float(row['Adj Close']))
+        data_point.append(float(row['Volume']))
+
+        data_points.insert(0, data_point) # using insert at 0 to reverse data so training starts at beginning
 
 
-    print(data_points)
-    # data_points is 1262 by 6 
+    # data_points = (data_points - data_points.mean(dim=0)) / data_points.std(dim=0)
+    ret_tensor = torch.tensor(data_points, dtype=torch.float32)
+    print(ret_tensor[:5])
+    print(ret_tensor.shape)
 
+    # normalize the tensor
+    ret_tensor = (ret_tensor - ret_tensor.mean(dim=0)) / ret_tensor.std(dim=0)
 
-    # NOTE: should move this have within the model since we should save the resize tensor?
-    #       not actually sure though, since we just need encoding per dp
-    #       might not need to be learned
-    for item in data_points:
-        resize_tensor = torch.randn((6,512))
-        item = item * resize_tensor
+    # split the tensor into train, test, validation subsets
+    train_size = int(0.7 * len(ret_tensor))
+    test_size = int(0.2 * len(ret_tensor))
+    val_size = len(ret_tensor) - train_size - test_size
 
-    print(data_points)
+    train_tensor, test_tensor, val_tensor = torch.utils.data.random_split(ret_tensor, [train_size, test_size, val_size])
 
+    # Save the tensors to their respective directories
+    torch.save(train_tensor, os.path.join(data_dir, 'train', 'normalized_stock_data.pt'))
+    torch.save(test_tensor, os.path.join(data_dir, 'test', 'normalized_stock_data.pt'))
+    torch.save(val_tensor, os.path.join(data_dir, 'validation', 'normalized_stock_data.pt'))
 
+    # data_points is 1258 by 6
+    # NOTE: this is about 3.5 years, meaning about 547 days of accuracy are lost
+    #       possibly due to their being no data on those days (weekends, holidays, notrade days etc.)
 
-
-    # append stock datapoints to end of the input sentences
-    
-    # split data:
-
-
-    
-    # input matrix will then be ((seq_len_hline + # stock_labels), d_model)
 
 
 
