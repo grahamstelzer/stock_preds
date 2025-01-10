@@ -20,9 +20,14 @@
 import pandas as pd
 import torch
 import os
+import matplotlib.pyplot as plt
+
+from newsapi import NewsApiClient
+from dotenv import load_dotenv
+import os
 
 
-# TODO: I think we HAVE to include the stock data in the matmults leading up to MHA but
+# TODO: I think we HAVE to include the stock data in the matmuls leading up to MHA but
 #   not sure how to do this yet since for words we just tokenize, but "d,o,h,l,c,ac,v"
 #   are just numbers, not words, so how do I append single float values next to the 
 #   positional encodings?
@@ -43,6 +48,12 @@ def preproc():
         subdir_path = os.path.join(data_dir, subdir)
         if not os.path.exists(subdir_path):
             os.makedirs(subdir_path)
+
+
+# =======================================================================
+# STOCK DATA PREPROC
+# NOTE: will organize into different functionts or files later
+# =======================================================================
 
 
 
@@ -79,7 +90,19 @@ def preproc():
         data_point.append(float(row['Adj Close']))
         data_point.append(float(row['Volume']))
 
+
+
+        # Append the data point to the data_points list
         data_points.insert(0, data_point) # using insert at 0 to reverse data so training starts at beginning
+
+    categories = ['Open', 'High', 'Low', 'Close', 'Adj Close']
+    for i, category in enumerate(categories):
+        plt.plot([data_point[i] for data_point in data_points], label=category)
+    plt.xlabel('Time')
+    plt.ylabel('Value')
+    plt.title('Stock Data Over Time')
+    plt.legend()
+    plt.show()
 
 
     # data_points = (data_points - data_points.mean(dim=0)) / data_points.std(dim=0)
@@ -87,8 +110,11 @@ def preproc():
     print(ret_tensor[:5])
     print(ret_tensor.shape)
 
+
     # normalize the tensor
     ret_tensor = (ret_tensor - ret_tensor.mean(dim=0)) / ret_tensor.std(dim=0)
+    print("normalized:")
+    print(ret_tensor[:5])
 
     # split the tensor into train, test, validation subsets
     train_size = int(0.7 * len(ret_tensor))
@@ -106,6 +132,46 @@ def preproc():
     # NOTE: this is about 3.5 years, meaning about 547 days of accuracy are lost
     #       possibly due to their being no data on those days (weekends, holidays, notrade days etc.)
 
+
+
+
+# =======================================================================
+# HEADLINE DATA PREPROC
+# =======================================================================
+
+
+
+
+
+
+# below directly from https://newsapi.org/docs/client-libraries/python
+def get_headlines():
+
+
+    # Init
+    load_dotenv()
+    api_key = os.getenv('NEWS_API_KEY')
+    newsapi = NewsApiClient(api_key=api_key)
+
+    # /v2/top-headlines
+    top_headlines = newsapi.get_top_headlines(q='bitcoin',
+                                            sources='bbc-news,the-verge',
+                                            category='business',
+                                            language='en',
+                                            country='us')
+
+    # /v2/everything
+    all_articles = newsapi.get_everything(q='bitcoin',
+                                        sources='bbc-news,the-verge',
+                                        domains='bbc.co.uk,techcrunch.com',
+                                        from_param='2017-12-01',
+                                        to='2017-12-12',
+                                        language='en',
+                                        sort_by='relevancy',
+                                        page=2)
+
+    # /v2/top-headlines/sources
+    sources = newsapi.get_sources()
 
 
 
