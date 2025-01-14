@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 from newsapi import NewsApiClient
 from dotenv import load_dotenv
 import os
+import random
 
 
 # TODO: I think we HAVE to include the stock data in the matmuls leading up to MHA but
@@ -63,115 +64,124 @@ def preproc():
     # take stock datapoints, each value becomes vector of length d_model
     # NOTE: output.csv is generated automatically from get_csv.js
     #       so COULD put into config but not really necessary right now
-    df = pd.read_csv("output.csv") # Date,Open,High,Low,Close,Adj Close,Volume
+    stock_df = pd.read_csv("data/Stock_data.csv") # Date,Open,High,Low,Close,Adj Close,Volume
 
-    df = df.dropna()
+    print(len(stock_df))
+
+    stock_df = stock_df.dropna()
     # remove lines that do not contain relevant data
-    df = df[~df.apply(lambda row: row.astype(str).str.contains('Dividend').any(), axis=1)] 
-    df = df[~df.apply(lambda row: row.astype(str).str.contains('Splits').any(), axis=1)]
+    stock_df = stock_df[~stock_df.apply(lambda row: row.astype(str).str.contains('Dividend').any(), axis=1)] 
+    stock_df = stock_df[~stock_df.apply(lambda row: row.astype(str).str.contains('Splits').any(), axis=1)]
+
+    print(f"Number of items in stock_df: {len(stock_df)}")
+# =======================================================================
+# get headlines into a df
+# =======================================================================
+
+    # Load headline data
+    headlines_df = pd.read_csv('data/CNN_articles.csv')
+
+    # extract headline and date from articles
+    headlines_map = {}
+    for index, row in headlines_df.iterrows():
+        date_published = row['Date published'].split(' ')[0]
+        headline = row['Headline'].replace(' - CNN', '')
+        if date_published not in headlines_map:
+            headlines_map[date_published] = []
+        headlines_map[date_published].append(headline)
 
 
-    # save the dates to create positional encodings
-    dates = []
-    for date in df['Date']:
-        dates.insert(0, date)
-    print(dates[:5])
-    print(len(dates))
-    
     # build data_points tensor
-    # NOTE: there is probably a faster way to do this but for code clarity I did it this way
-    data_points = []
-    for index, row in df.iterrows():
-        data_point = []
-        data_point.append(float(row['Open']))
-        data_point.append(float(row['High']))
-        data_point.append(float(row['Low']))
-        data_point.append(float(row['Close']))
-        data_point.append(float(row['Adj Close']))
-        data_point.append(float(row['Volume']))
+# TODO: there is something wrong with this and I dont know why
+#       - the loop runs 5133 times (tested with a loopcounter)
+#       - the number of rows parsed is 5133
+#       - the size of combined matrix is 5133
+#       - BUT, the indices go from 0 to 5138??
+#       - NOTE: the len of the uncleaned stock_df is 5139 BUT
+#               i checked above, the length of that becomes 5133
+#               after cleening and isnt touched afterwards
+    combined = []
+    # not sure if ill need a min and max later but saving just in case
+    min_val = 999999
+    max_val = -999999
+    for index, row in stock_df.iterrows():
+        numerical_data = []
+        # ensure they are all floats
+        numerical_data.append(float(row['Open']))
+        numerical_data.append(float(row['High']))
+        numerical_data.append(float(row['Low']))
+        numerical_data.append(float(row['Close']))
+        numerical_data.append(float(row['Adj Close']))
+
+        min_val = min(min_val, *numerical_data) # NOTE: asterisk lets each value in numerical_data get passed ot min function
+        max_val = max(max_val, *numerical_data)
+
+
+        # normalize
+        # TODO: fix normalization, attempting below causes datapoints like
+        # [... 0.5000000000000011, 1.0, 0.0, 0.5500000000000002, 0.5000000000000011 ...]
+        # or using small epsilon in denominator:
+        # [... 0.4999999750000024, 0.9999999500000025, 0.0, 0.5499999725000015, 0.4999999750000024 ...]
+        # epsilon = 1e-8
+        # numerical_data = [(x - min(numerical_data)) / (max(numerical_data) - min(numerical_data) + epsilon) for x in numerical_data]
+
+        # use the date to get a headline with that date
+        random_dated_headline = ""
+        date = row['Date']
+        if date in headlines_map:
+            random_dated_headline = random.choice(headlines_map[date])
+        else:
+            random_dated_headline = "No headline available"
+
+        # appending the volume seperately since its much higher than the small values for Open...Adj Close
+        combined.append([index] + [date] + numerical_data + [float(row['Volume'])] + [random_dated_headline])
+        
 
 
 
-        # Append the data point to the data_points list
-        data_points.insert(0, data_point) # using insert at 0 to reverse data so training starts at beginning
-
-    categories = ['Open', 'High', 'Low', 'Close', 'Adj Close']
-    for i, category in enumerate(categories):
-        plt.plot([data_point[i] for data_point in data_points], label=category)
-    plt.xlabel('Time')
-    plt.ylabel('Value')
-    plt.title('Stock Data Over Time')
-    plt.legend()
-    plt.show()
+    print(f"Number of rows parsed: {len(combined)}")
+    print(f"min: {min_val}, max: {max_val}")
+    print(combined[:5])
+    middle_index = len(combined) // 2
+    print(combined[middle_index - 2:middle_index + 3])
+    print(combined[-5:])
 
 
-    # data_points = (data_points - data_points.mean(dim=0)) / data_points.std(dim=0)
-    ret_tensor = torch.tensor(data_points, dtype=torch.float32)
-    print(ret_tensor[:5])
-    print(ret_tensor.shape)
+    # place the headlines in the string sections of each data_point
+    # ex:
+    # [5132, '2025-01-10', '195.41', 197.62, 191.6, 193.17, 193.17, 18566759.0, '<headline goes here>']
 
 
-    # normalize the tensor
-    ret_tensor = (ret_tensor - ret_tensor.mean(dim=0)) / ret_tensor.std(dim=0)
-    print("normalized:")
-    print(ret_tensor[:5])
-
-    # split the tensor into train, test, validation subsets
-    train_size = int(0.7 * len(ret_tensor))
-    test_size = int(0.2 * len(ret_tensor))
-    val_size = len(ret_tensor) - train_size - test_size
-
-    train_tensor, test_tensor, val_tensor = torch.utils.data.random_split(ret_tensor, [train_size, test_size, val_size])
-
-    # Save the tensors to their respective directories
-    torch.save(train_tensor, os.path.join(data_dir, 'train', 'normalized_stock_data.pt'))
-    torch.save(test_tensor, os.path.join(data_dir, 'test', 'normalized_stock_data.pt'))
-    torch.save(val_tensor, os.path.join(data_dir, 'validation', 'normalized_stock_data.pt'))
-
-    # data_points is 1258 by 6
-    # NOTE: this is about 3.5 years, meaning about 547 days of accuracy are lost
-    #       possibly due to their being no data on those days (weekends, holidays, notrade days etc.)
-
-
-
-
-# =======================================================================
-# HEADLINE DATA PREPROC
-# =======================================================================
-
-
-
-
-
+# NOTE: have to pay like 500$ to get access to anything actually useful through newsapi
+#       aka. im not gonna do that
 
 # below directly from https://newsapi.org/docs/client-libraries/python
-def get_headlines():
+# def get_headlines():
 
+#     # Init
+#     load_dotenv()
+#     api_key = os.getenv('NEWS_API_KEY')
+#     newsapi = NewsApiClient(api_key=api_key)
 
-    # Init
-    load_dotenv()
-    api_key = os.getenv('NEWS_API_KEY')
-    newsapi = NewsApiClient(api_key=api_key)
+#     # /v2/top-headlines
+#     top_headlines = newsapi.get_top_headlines(q='bitcoin',
+#                                             sources='bbc-news,the-verge',
+#                                             category='business',
+#                                             language='en',
+#                                             country='us')
 
-    # /v2/top-headlines
-    top_headlines = newsapi.get_top_headlines(q='bitcoin',
-                                            sources='bbc-news,the-verge',
-                                            category='business',
-                                            language='en',
-                                            country='us')
+#     # /v2/everything
+#     all_articles = newsapi.get_everything(q='bitcoin',
+#                                         sources='bbc-news,the-verge',
+#                                         domains='bbc.co.uk,techcrunch.com',
+#                                         from_param='2017-12-01',
+#                                         to='2017-12-12',
+#                                         language='en',
+#                                         sort_by='relevancy',
+#                                         page=2)
 
-    # /v2/everything
-    all_articles = newsapi.get_everything(q='bitcoin',
-                                        sources='bbc-news,the-verge',
-                                        domains='bbc.co.uk,techcrunch.com',
-                                        from_param='2017-12-01',
-                                        to='2017-12-12',
-                                        language='en',
-                                        sort_by='relevancy',
-                                        page=2)
-
-    # /v2/top-headlines/sources
-    sources = newsapi.get_sources()
+#     # /v2/top-headlines/sources
+#     sources = newsapi.get_sources()
 
 
 
