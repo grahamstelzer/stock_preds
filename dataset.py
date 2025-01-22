@@ -16,23 +16,26 @@
 # TODO: build dataset from saved files from preproc
 # TODO: make sure the input word embeddings are simply the tokenized representations
 
-# TODO: somewhere we need to extract all the "headlines" and "stocks_vector"s from the combined CSV
-#       so we can send to dataset constructor
+# TODO: double check tbe batching, I dont know if the returned "combined"
+#       sequence is the len of one headline or multiple
+#           - try a test headline
+
 
 import torch
+import csv
 import torch.nn as nn
 
+from torch.nn.utils.rnn import pad_sequence
+from collections import Counter
+
 class SlidingWindowDataset(torch.utils.data.Dataset):
-    # take in data like such:
-    # Index,Date,Open,High,Low,Close,Adj Close,Volume,Headline
-    # 1767,2011-08-24,12.93,13.2,12.88,13.03,12.99,144318923.0,Senna to replace Heidfeld in Belgium
-    def __init__(self, headlines, stock_vectors, embedding_model, d_model, window_size):
+
+    def __init__(self, headlines, stock_vectors, d_model, window_size):
 
         # save values
-        self.embedding_model = embedding_model
         self.d_model = d_model
         self.window_size = window_size
-        
+
         # setup linear layer for the stocks_vector transformation
         self.linear = nn.Linear(6, d_model) # NOTE: change this on adding volume or not
 
@@ -40,19 +43,25 @@ class SlidingWindowDataset(torch.utils.data.Dataset):
         #       in this case, they are just part of the data format, so it SHOULD be fine
         #       - TODO: research better techniques
 
-        self.embeddings = [embedding_model(headline) for headline in headlines]
-        self.stock_vectors = [torch.tensor(stock_vector) for stock_vector in stock_vectors]
-        self.transformed_stock_vectors = [self.linear(stock_vector).unsqueeze(0) for stock_vector in self.stock_vectors]
 
-        print("embeddings:")
-        print(self.embeddings)
-        print("stock vectors")
-        print(self.stock_vectors)
-        print("transformed stock vectors:")
-        print(self.transformed_stock_vectors)
+        word_embeddings = self.generate_word_embeddings(headlines) # should be 2650, 10, 512
+        stock_embeddings = self.generate_stock_embeddings(stock_vectors) # should be 2650, 1, 512
 
-        self.combined = [torch.cat([emb, tsf], dim=0) for emb, tsf in zip(self.embeddings, self.transformed_stock_vectors)]
-        self.sequence = torch.cat(self.combined, dim=0)  # Full sequence (total_seq_len, d_model)
+        # Concatenate word embeddings with stock embeddings
+        self.sequence = []
+        for word_emb, stock_emb in zip(word_embeddings, stock_embeddings):
+
+            stock_emb = stock_emb.detach()
+            word_emb = word_emb.detach()
+
+            combined = torch.cat((word_emb, stock_emb), dim=0)  # Concatenate along the sequence length dimension
+            
+            self.sequence.append(combined)
+
+        self.sequence = torch.stack(self.sequence)  # Shape: (2650, seq_len, 512)
+
+        print(self.sequence.shape)
+        print(self.sequence[0])
 
     def __len__(self):
         return len(self.sequence) - self.window_size
@@ -60,68 +69,242 @@ class SlidingWindowDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         # Input: Current window
         window = self.sequence[idx:idx + self.window_size]  # (window_size, d_model)
+        # print(window.shape)
         # Target: Next date
         target = self.sequence[idx + self.window_size]  # (1, d_model)
+        # print(target.shape)
         return window, target
+
+    def generate_word_embeddings(self, sentences):
+        
+        # tokenize
+        tokenized = [sentence.lower().split() for sentence in sentences]
+        
+        vocab = {word: idx for idx, word in enumerate({word for sentence in tokenized for word in sentence})}
+        vocab_size = len(vocab)
+
+        token_indices = [[vocab[word] for word in sentence] for sentence in tokenized]
+
+        seq_len = max(len(seq) for seq in tokenized)  # Define the maximum sequence length
+        padded_indices = [torch.tensor(seq + [0] * (seq_len - len(seq)), dtype=torch.long, requires_grad=False)[:seq_len] for seq in token_indices]
+
+        # TODO: move this out to class init
+        d_model = 512  # Dimension of embedding
+        embedding_layer = nn.Embedding(vocab_size, d_model)
+
+        padded_tensor = torch.stack(padded_indices)
+
+        word_embeddings = embedding_layer(padded_tensor)  # Shape: (batch_size, seq_len, d_model)
+
+        print(word_embeddings.shape)  # Output: (3, 10, 512)
+
+        return word_embeddings
     
+    def generate_stock_embeddings(self, stock_vectors):
 
-    
+        stock_tensors = [torch.tensor(stock_vector, dtype=torch.float32) for stock_vector in stock_vectors]
+
+        normalized_stocks = [(stock_tensor - stock_tensor.mean()) / stock_tensor.std() for stock_tensor in stock_tensors]
+
+        transformed_stocks = [self.linear(stock_tensor).unsqueeze(0) for stock_tensor in normalized_stocks]
+
+        stock_embeddings = torch.cat(transformed_stocks, dim=0).unsqueeze(1)  # Full sequence (total_seq_len, 1, d_model)
+
+        print(stock_embeddings.shape)
+
+        return stock_embeddings
 
 
-# Define a mock embedding model
-class MockEmbeddingModel(nn.Module):
-    def __init__(self, d_model):
+
+
+
+
+
+# get items for dataset input
+# NOTE: must make sure the stockdata lens are what the dataset expects
+#       currently 6 and 6, considers Open...Volume categories from training.csv
+
+def get_headlines():
+    headlines = []
+    with open('./data/train/training.csv', 'r') as file:
+        reader = csv.reader(file)
+        next(reader)  # Skip header
+        for row in reader:
+            headlines.append(row[8])  # headliens at column index 8
+    return headlines
+
+def get_stockdata():
+    all_data = []
+    with open('./data/train/training.csv', 'r') as file:
+        reader = csv.reader(file)
+        next(reader)  # Skip header
+        for row in reader:
+            sublist = [float(item) for item in row[2:8]]
+            all_data.append(sublist)
+        return all_data
+
+
+
+
+
+# transformer model
+# TODO: move this to model.py
+
+import matplotlib.pyplot as plt
+
+class Transformer(nn.Module):
+
+    def __init__(self, width=512, layers=4): # TODO: other params?
         super().__init__()
-        self.d_model = d_model
 
-    def forward(self, sentence):
-        # Mock embedding: Convert each character in the sentence to a random vector
-        seq_len = len(sentence)
-        return torch.randn(seq_len, self.d_model)
+        self.layers = layers
 
-# Parameters
-d_model = 16  # Dimensionality of the embeddings
-window_size = 5  # Size of the sliding window
-sentences = ["hello", "world", "torch", "dataset", "example"]  # Sample sentences
-small_floats = [[0.1, 0.2, 0.3, 0.4, 0.5, 0.6] for _ in sentences]  # Dummy small float vectors
+        # TODO: tweak these
+        layer = nn.TransformerEncoderLayer(
+            d_model = width,
+            nhead=width // 64,
+            dim_feedforward=width * 4,
+            dropout=0.0,
+            activation="gelu",
+            batch_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(layer, num_layers=layers)
 
-# Initialize the mock embedding model
-embedding_model = MockEmbeddingModel(d_model)
+        # TODO: should match target from dataset??
+        #       I think embed out is supposed to be a final transformation before 
+        #       we return so that it matches the target when calculating loss value
+        self.embed_out = nn.Linear(width, width) 
 
-# Create the SlidingWindowDataset
-dataset = SlidingWindowDataset(sentences, small_floats, embedding_model, d_model, window_size)
+    def forward(self, x):
+        # TODO: double check the dimensions on this
+        # x should be (batch, window_size (as seq_len), d_model)??
+        x = self.transformer(x)
 
-# Check dataset properties
-print(f"Dataset length: {len(dataset)}")
-
-# Access a sample
-for i in range(min(3, len(dataset))):  # Show the first 3 samples
-    window, target = dataset[i]
-    print(f"Sample {i}:")
-    print(f"  Window shape: {window.shape}")  # Should be (window_size, d_model)
-    print(f"  Target shape: {target.shape}")  # Should be (d_model,)
-
-# Create a DataLoader for batching
-dataloader = torch.utils.data.DataLoader(dataset, batch_size=2, shuffle=True)
-
-# Iterate through the DataLoader
-print("\nDataloader output:")
-for batch_idx, (windows, targets) in enumerate(dataloader):
-    print(f"Batch {batch_idx}:")
-    print(f"  Windows shape: {windows.shape}")  # Should be (batch_size, window_size, d_model)
-    print(f"  Targets shape: {targets.shape}")  # Should be (batch_size, d_model)
+        # then return as (batch, window, d_model)?
+        return self.embed_out(x)
 
 
 
-# Example data
-sentences = ["Sentence 1", "Sentence 2", "Sentence 3", "Sentence 4"]
-numerical_data = [[2, 2, 2, 4, 5, 6], [2, 3, 4, 5, 6, 7], [3, 4, 5, 6, 7, 8], [4, 5, 6, 7, 8, 9]]
 
-# Create the dataset and DataLoader
-# dataset = SequentialDataset(sentences, numerical_data, window_size=1)
-# train_size = int(0.8 * len(dataset))
-# test_size = len(dataset) - train_size
-# train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
+d_model = 512 
+window_size = 9
+sentences = get_headlines()
+small_floats = get_stockdata()
 
-# train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=2, shuffle=False)
-# test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=2, shuffle=False)
+dataset = SlidingWindowDataset(sentences, small_floats, d_model, window_size)
+encoder_model = Transformer()
+
+
+# train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+# val_dataloader = DataLoader(val_dataset, batch_size=32)
+
+# model = train_transformer(
+#     model=transformer_model,
+#     train_dataloader=train_dataloader,
+#     val_dataloader=val_dataloader,
+#     num_epochs=10,
+#     learning_rate=1e-4,
+#     device='cuda' if torch.cuda.is_available() else 'cpu'
+# )
+
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+import seaborn as sns
+
+def train_transformer(model, train_loader, optimizer, num_epochs, device='cuda'):
+    """
+    Training loop for transformer model with sliding window prediction
+    focusing on the last row of each target matrix for loss calculation.
+    """
+    model.train()
+    criterion = nn.MSELoss()  # or your preferred loss function
+    
+    for epoch in range(num_epochs):
+        total_loss = 0
+        progress_bar = tqdm(train_loader, desc=f'Epoch {epoch + 1}/{num_epochs}')
+        
+        for batch_idx, (windows, targets) in enumerate(progress_bar):
+            # Move data to device
+            windows = windows.to(device)  # shape: [batch_size, 9, 27, 512]
+            targets = targets.to(device)  # shape: [batch_size, 27, 512]
+            
+            # Zero gradients
+            optimizer.zero_grad()
+            
+            # Forward pass
+            # Reshape windows if needed for your transformer
+            batch_size = windows.shape[0]
+            windows_reshaped = windows.view(batch_size, 243, 512)  # shape: [batch_size, 9*27, 512]
+            
+            # Get model predictions
+            outputs = model(windows_reshaped)  # shape: [batch_size, 27, 512]
+            
+
+            # Extract only the last row (27th row) from both predictions and targets
+            predicted_last_row = outputs[:, -1, :]  # shape: [batch_size, 512]
+            target_last_row = targets[:, -1, :]    # shape: [batch_size, 512]
+            # Graph the first value in each of these rows over time using matplotlib
+            if batch_idx == len(train_loader) - 1:  # Only plot at the end of each epoch
+                for i in range(3):  # Only plot the first 3 values
+                    pred_values = predicted_last_row[:, i].detach().cpu().numpy()
+                    target_values = target_last_row[:, i].detach().cpu().numpy()
+                    
+                    plt.plot(pred_values, label=f'Predicted Value {i}')
+                    plt.plot(target_values, linestyle='dotted', label=f'Target Value {i}')
+                
+                plt.xlabel('Time')
+                plt.ylabel('Values')
+                plt.title(f'First 3 Values in Last Row Over Time - Epoch {epoch + 1}')
+                plt.legend()
+                plt.show()
+            # Calculate loss only on the last row
+            loss = criterion(predicted_last_row, target_last_row)
+            
+            # Backward pass and optimize
+            loss.backward()
+            optimizer.step()
+            
+            # Update total loss
+            total_loss += loss.item()
+            
+            # Update progress bar
+            progress_bar.set_postfix({
+                'loss': f'{loss.item():.6f}',
+                'avg_loss': f'{total_loss / (batch_idx + 1):.6f}'
+            })
+        
+        epoch_loss = total_loss / len(train_loader)
+        print(f'Epoch {epoch + 1}/{num_epochs} - Average Loss: {epoch_loss:.6f}')
+        
+    return model
+
+# Example usage:
+def main():
+    # Assuming your dataset and model are already defined
+    batch_size = 32
+    num_epochs = 10
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # Create DataLoader
+    train_loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=4
+    )
+    
+    # Initialize model, optimizer
+    model = encoder_model.to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    
+    # Train the model
+    trained_model = train_transformer(
+        model=model,
+        train_loader=train_loader,
+        optimizer=optimizer,
+        num_epochs=num_epochs,
+        device=device
+    )
+
+
+main()
