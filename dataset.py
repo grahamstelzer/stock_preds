@@ -51,6 +51,7 @@ class SlidingWindowDataset(torch.utils.data.Dataset):
         self.sequence = []
         for word_emb, stock_emb in zip(word_embeddings, stock_embeddings):
 
+            # TODO: research detach() function
             stock_emb = stock_emb.detach()
             word_emb = word_emb.detach()
 
@@ -60,19 +61,18 @@ class SlidingWindowDataset(torch.utils.data.Dataset):
 
         self.sequence = torch.stack(self.sequence)  # Shape: (2650, seq_len, 512)
 
-        print(self.sequence.shape)
-        print(self.sequence[0])
+        # print(self.sequence.shape)
+        # print(self.sequence[0])
 
     def __len__(self):
         return len(self.sequence) - self.window_size
 
     def __getitem__(self, idx):
         # Input: Current window
-        window = self.sequence[idx:idx + self.window_size]  # (window_size, d_model)
-        # print(window.shape)
+        window = self.sequence[idx:idx + self.window_size]  # (window_size, seq_len, d_model)
         # Target: Next date
-        target = self.sequence[idx + self.window_size]  # (1, d_model)
-        # print(target.shape)
+        target = self.sequence[idx + self.window_size]  # (seq_len, d_model)
+
         return window, target
 
     def generate_word_embeddings(self, sentences):
@@ -96,7 +96,7 @@ class SlidingWindowDataset(torch.utils.data.Dataset):
 
         word_embeddings = embedding_layer(padded_tensor)  # Shape: (batch_size, seq_len, d_model)
 
-        print(word_embeddings.shape)  # Output: (3, 10, 512)
+        # print(word_embeddings.shape)  # Output: (3, 10, 512)
 
         return word_embeddings
     
@@ -110,10 +110,26 @@ class SlidingWindowDataset(torch.utils.data.Dataset):
 
         stock_embeddings = torch.cat(transformed_stocks, dim=0).unsqueeze(1)  # Full sequence (total_seq_len, 1, d_model)
 
-        print(stock_embeddings.shape)
+        # print(stock_embeddings.shape)
 
         return stock_embeddings
 
+    def reverse_transform(self, tensor):
+        """
+        Reverse the transformation of a 1 by 512 tensor back to a 1 by 6 tensor using the same linear layer.
+        """
+        # Use the inverse of the linear transformation
+        inverse_linear = nn.Linear(self.d_model, 6).to(tensor.device)
+        
+        # Copy the weights and biases from the original linear layer
+        inverse_linear.weight.data = self.linear.weight.data.t().to(tensor.device)
+        inverse_linear.bias.data = -torch.matmul(self.linear.weight.data.t().to(tensor.device), self.linear.bias.data.to(tensor.device))
+        
+        original_tensor = inverse_linear(tensor)
+
+        print(f"rev_trans: {original_tensor}")
+        
+        return original_tensor
 
 
 
@@ -168,12 +184,14 @@ class Transformer(nn.Module):
             activation="gelu",
             batch_first=True,
         )
+
+
         self.transformer = nn.TransformerEncoder(layer, num_layers=layers)
 
         # TODO: should match target from dataset??
         #       I think embed out is supposed to be a final transformation before 
         #       we return so that it matches the target when calculating loss value
-        self.embed_out = nn.Linear(width, width) 
+        # self.embed_out = nn.Linear(width, width) 
 
     def forward(self, x):
         # TODO: double check the dimensions on this
@@ -181,7 +199,7 @@ class Transformer(nn.Module):
         x = self.transformer(x)
 
         # then return as (batch, window, d_model)?
-        return self.embed_out(x)
+        return x
 
 
 
@@ -211,59 +229,82 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import seaborn as sns
 
+
 def train_transformer(model, train_loader, optimizer, num_epochs, device='cuda'):
     """
     Training loop for transformer model with sliding window prediction
     focusing on the last row of each target matrix for loss calculation.
+
+    NOTE:
+        rework the training loop, need to make sure the sliding window is looking at the right values
+        currently loss values are super low, but the tensors being looked at are wrong
+        remember we only care about the last row of each 27*512 matrix for calculating loss, since that should be stock values
+        i think we may need to try and predict the full matrix, but send less attentiveness to the first 26 rows if possible
     """
     model.train()
     criterion = nn.MSELoss()  # or your preferred loss function
-    
+    tar_pred_pairs = []
+
+
     for epoch in range(num_epochs):
         total_loss = 0
         progress_bar = tqdm(train_loader, desc=f'Epoch {epoch + 1}/{num_epochs}')
         
         for batch_idx, (windows, targets) in enumerate(progress_bar):
-            # Move data to device
-            windows = windows.to(device)  # shape: [batch_size, 9, 27, 512]
-            targets = targets.to(device)  # shape: [batch_size, 27, 512]
+
+            # print(windows.shape) # (32, 9, 27, 512)     batch_size, window_size, seq_len, dmodel
+            # print(targets.shape) # (32, 27, 512)        batch_size, seq_len, dmodel
+
+            # input into transformer should be (32, 243, 512)
+            #   or 32 instances of 243 by 512 matrices
+            #   where each 243 by 512 is technically the seq_len * window_size (27 * 9)  
+
+            #   batches should start with matrices 0-8 (window_size=9 as indices) and predict the 9th as a single 27 by 512 matrix
+            #   then we will do matrices 1-9 (window_size=9 as indices) and try to predict the 10th as a 27 by 512
             
-            # Zero gradients
-            optimizer.zero_grad()
+            # Reshape the windows to (batch_size, window_size * seq_len, d_model)
+            windows = windows.view(windows.size(0), -1, windows.size(-1))  # (32, 243, 512)
+            
+            # Move data to device
+            windows, targets = windows.to(device), targets.to(device)
             
             # Forward pass
-            # Reshape windows if needed for your transformer
-            batch_size = windows.shape[0]
-            windows_reshaped = windows.view(batch_size, 243, 512)  # shape: [batch_size, 9*27, 512]
+            outputs = model(windows)  # (batch_size, window_size * seq_len, d_model)
+            print(outputs.shape)
             
-            # Get model predictions
-            outputs = model(windows_reshaped)  # shape: [batch_size, 27, 512]
-            
+            # Extract the last row of each target matrix
+            target_last_row = targets[-1:, -1, :]  # (batch_size, d_model)
+            predicted_last_row = outputs[-1:, -1, :]  # (batch_size, d_model)
 
-            # Extract only the last row (27th row) from both predictions and targets
-            predicted_last_row = outputs[:, -1, :]  # shape: [batch_size, 512]
-            target_last_row = targets[:, -1, :]    # shape: [batch_size, 512]
-            # Graph the first value in each of these rows over time using matplotlib
-            if batch_idx == len(train_loader) - 1:  # Only plot at the end of each epoch
-                for i in range(3):  # Only plot the first 3 values
-                    pred_values = predicted_last_row[:, i].detach().cpu().numpy()
-                    target_values = target_last_row[:, i].detach().cpu().numpy()
-                    
-                    plt.plot(pred_values, label=f'Predicted Value {i}')
-                    plt.plot(target_values, linestyle='dotted', label=f'Target Value {i}')
-                
-                plt.xlabel('Time')
-                plt.ylabel('Values')
-                plt.title(f'First 3 Values in Last Row Over Time - Epoch {epoch + 1}')
-                plt.legend()
-                plt.show()
+
+            # 32, 512??
+            # print(target_last_row.shape)
+            # print(predicted_last_row.shape)
+
+            # print(target_last_row)
+            # print(predicted_last_row)
+
             # Calculate loss only on the last row
             loss = criterion(predicted_last_row, target_last_row)
+
+
+            if batch_idx % 10 == 0:
+                un_embedded_target = dataset.reverse_transform(target_last_row)
+                un_embedded_predicted = dataset.reverse_transform(predicted_last_row)
+
+                # print(un_embedded_target.shape)
+                # print(un_embedded_predicted.shape)
+
+                tar_pred_pairs.append([un_embedded_target, un_embedded_predicted]) # should be ( ((6),(6)), ((6),(6)) ... )
+
+                print(f"len of tpp: {len(tar_pred_pairs)}")
+
             
             # Backward pass and optimize
             loss.backward()
             optimizer.step()
-            
+        
+
             # Update total loss
             total_loss += loss.item()
             
@@ -274,13 +315,29 @@ def train_transformer(model, train_loader, optimizer, num_epochs, device='cuda')
             })
         
         epoch_loss = total_loss / len(train_loader)
+
+
+
         print(f'Epoch {epoch + 1}/{num_epochs} - Average Loss: {epoch_loss:.6f}')
         
+    # plot the first values of all the sublists in 
+    print(tar_pred_pairs)
+
+    targets = [pair[0][0].tolist() for pair in tar_pred_pairs]
+    predictions = [pair[1][0].tolist() for pair in tar_pred_pairs]
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(targets, 'r--', label='Target')
+    plt.plot(predictions, 'b-', label='Prediction')
+    plt.xlabel('Index')
+    plt.ylabel('Value')
+    plt.title('Target vs Prediction')
+    plt.legend()
+    plt.show()
+    
     return model
 
-# Example usage:
 def main():
-    # Assuming your dataset and model are already defined
     batch_size = 32
     num_epochs = 10
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
